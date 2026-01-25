@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+*.md
+
+# Docker files (don't include in image)
+docker-compose.yml
+docker-compose.yml.template
+.dockerignore
+
+# Environment files
+.env
+.env.example
+.env.*
+
+# CLI tool
+wp-docker-cli.sh
+
+# Build scripts
+build.sh
+push.sh
+
+# Cloudflared config (user-specific)
+cloudflared/
+cloudflared-config.yml.template
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/

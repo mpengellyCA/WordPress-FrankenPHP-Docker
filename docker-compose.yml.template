@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  wordpress:
+    image: ${DOCKER_IMAGE:-ghcr.io/${GITHUB_USER}/wordpress-frankenphp:latest}
+    container_name: ${SITE_NAME:-wordpress}_wp
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: ${DB_USER}
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+      WORDPRESS_DB_NAME: ${DB_NAME}
+      WORDPRESS_TABLE_PREFIX: ${DB_TABLE_PREFIX:-wp_}
+      WORDPRESS_URL: https://${DOMAIN}
+      WORDPRESS_AUTH_KEY: ${WP_AUTH_KEY}
+      WORDPRESS_SECURE_AUTH_KEY: ${WP_SECURE_AUTH_KEY}
+      WORDPRESS_LOGGED_IN_KEY: ${WP_LOGGED_IN_KEY}
+      WORDPRESS_NONCE_KEY: ${WP_NONCE_KEY}
+      WORDPRESS_AUTH_SALT: ${WP_AUTH_SALT}
+      WORDPRESS_SECURE_AUTH_SALT: ${WP_SECURE_AUTH_SALT}
+      WORDPRESS_LOGGED_IN_SALT: ${WP_LOGGED_IN_SALT}
+      WORDPRESS_NONCE_SALT: ${WP_NONCE_SALT}
+    volumes:
+      - wordpress_data:/var/www/html
+    networks:
+      - wordpress_network
+    healthcheck:
+      test: ["CMD", "php", "-r", "echo 'OK';"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: mariadb:latest
+    container_name: ${SITE_NAME:-wordpress}_db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - wordpress_network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ${SITE_NAME:-wordpress}_tunnel
+    restart: unless-stopped
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - cloudflared_config:/etc/cloudflared
+    networks:
+      - wordpress_network
+    depends_on:
+      - wordpress
+
+volumes:
+  wordpress_data:
+    driver: local
+  db_data:
+    driver: local
+  cloudflared_config:
+    driver: local
+
+networks:
+  wordpress_network:
+    driver: bridge
