@@ -136,22 +136,133 @@ prompt_api_credentials() {
         
         # Cloudflare API Token
         if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo -e "${BLUE}Enter your Cloudflare API Token:${NC}"
-            echo -e "${YELLOW}(Required permissions: Zone:Read, Zone:Edit, Account:Cloudflare Tunnel:Edit)${NC}"
-            read -p "Cloudflare API Token: " CLOUDFLARE_API_TOKEN
-            export CLOUDFLARE_API_TOKEN
+            while true; do
+                echo -e "${BLUE}Enter your Cloudflare API Token:${NC}"
+                echo -e "${YELLOW}(Required permissions: Zone:Read, Zone:Edit, Account:Cloudflare Tunnel:Edit)${NC}"
+                read -p "Cloudflare API Token: " CLOUDFLARE_API_TOKEN
+                
+                if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+                    echo -e "${RED}Error: Token cannot be empty${NC}"
+                    continue
+                fi
+                
+                export CLOUDFLARE_API_TOKEN
+                echo -e "${BLUE}Validating Cloudflare API token...${NC}"
+                
+                # Initialize and validate
+                cloudflare_init "$CLOUDFLARE_API_TOKEN"
+                account_id=$(cloudflare_get_account_id)
+                if [ -n "$account_id" ]; then
+                    if cloudflare_validate_token "$account_id"; then
+                        echo -e "${GREEN}✓ Cloudflare API token is valid${NC}"
+                        break
+                    else
+                        echo -e "${RED}✗ Cloudflare API token is invalid${NC}"
+                        read -p "Would you like to try again? (Y/n): " retry
+                        if [[ $retry =~ ^[Nn]$ ]]; then
+                            echo -e "${YELLOW}Skipping Cloudflare automation...${NC}"
+                            CLOUDFLARE_API_TOKEN=""
+                            export CLOUDFLARE_API_TOKEN
+                            break
+                        fi
+                        CLOUDFLARE_API_TOKEN=""
+                        continue
+                    fi
+                else
+                    # Fallback to user endpoint
+                    if cloudflare_validate_token; then
+                        echo -e "${GREEN}✓ Cloudflare API token is valid${NC}"
+                        break
+                    else
+                        echo -e "${RED}✗ Cloudflare API token is invalid${NC}"
+                        read -p "Would you like to try again? (Y/n): " retry
+                        if [[ $retry =~ ^[Nn]$ ]]; then
+                            echo -e "${YELLOW}Skipping Cloudflare automation...${NC}"
+                            CLOUDFLARE_API_TOKEN=""
+                            export CLOUDFLARE_API_TOKEN
+                            break
+                        fi
+                        CLOUDFLARE_API_TOKEN=""
+                        continue
+                    fi
+                fi
+            done
+        else
+            # Validate existing token
+            echo -e "${BLUE}Validating existing Cloudflare API token...${NC}"
+            cloudflare_init "$CLOUDFLARE_API_TOKEN"
+            account_id=$(cloudflare_get_account_id)
+            if [ -n "$account_id" ]; then
+                if ! cloudflare_validate_token "$account_id"; then
+                    echo -e "${RED}✗ Existing Cloudflare API token is invalid${NC}"
+                    CLOUDFLARE_API_TOKEN=""
+                    export CLOUDFLARE_API_TOKEN
+                    prompt_api_credentials
+                    return
+                fi
+            fi
         fi
         
         # GitHub Token
         if [ -z "$GITHUB_TOKEN" ]; then
-            echo -e "${BLUE}Enter your GitHub Personal Access Token:${NC}"
-            echo -e "${YELLOW}(Required scopes: write:packages, read:packages)${NC}"
-            read -p "GitHub Token: " GITHUB_TOKEN
-            export GITHUB_TOKEN
+            while true; do
+                echo ""
+                echo -e "${BLUE}Enter your GitHub Personal Access Token:${NC}"
+                echo -e "${YELLOW}(Required scopes: write:packages, read:packages)${NC}"
+                read -p "GitHub Token: " GITHUB_TOKEN
+                
+                if [ -z "$GITHUB_TOKEN" ]; then
+                    echo -e "${RED}Error: Token cannot be empty${NC}"
+                    continue
+                fi
+                
+                export GITHUB_TOKEN
+                echo -e "${BLUE}Validating GitHub token...${NC}"
+                
+                # Initialize GitHub API (username not required for validation)
+                if [ -n "$GITHUB_USERNAME" ]; then
+                    github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
+                else
+                    # Use a placeholder username for validation
+                    github_init "$GITHUB_TOKEN" "placeholder"
+                fi
+                
+                if github_validate_token; then
+                    echo -e "${GREEN}✓ GitHub token is valid${NC}"
+                    break
+                else
+                    echo -e "${RED}✗ GitHub token is invalid${NC}"
+                    read -p "Would you like to try again? (Y/n): " retry
+                    if [[ $retry =~ ^[Nn]$ ]]; then
+                        echo -e "${YELLOW}Skipping GitHub automation...${NC}"
+                        GITHUB_TOKEN=""
+                        export GITHUB_TOKEN
+                        break
+                    fi
+                    GITHUB_TOKEN=""
+                    continue
+                fi
+            done
+        else
+            # Validate existing token
+            echo -e "${BLUE}Validating existing GitHub token...${NC}"
+            if [ -n "$GITHUB_USERNAME" ]; then
+                github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
+            else
+                github_init "$GITHUB_TOKEN" "placeholder"
+            fi
+            if ! github_validate_token; then
+                echo -e "${RED}✗ Existing GitHub token is invalid${NC}"
+                GITHUB_TOKEN=""
+                export GITHUB_TOKEN
+                prompt_api_credentials
+                return
+            fi
         fi
         
         # GitHub Username
         if [ -z "$GITHUB_USERNAME" ] && [ -z "$GITHUB_USER" ]; then
+            echo ""
             echo -e "${BLUE}Enter your GitHub username:${NC}"
             read -p "GitHub Username: " GITHUB_USERNAME
             export GITHUB_USERNAME
@@ -159,24 +270,120 @@ prompt_api_credentials() {
             export GITHUB_USERNAME="$GITHUB_USER"
         fi
         
+        # Initialize GitHub API if we have both token and username
+        if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_USERNAME" ]; then
+            github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
+        fi
+        
         # Komodo credentials (optional)
         echo ""
         read -p "Do you want to configure Komodo deployment? (y/N): " configure_komodo
         if [[ $configure_komodo =~ ^[Yy]$ ]]; then
+            # Komodo Base URL
             if [ -z "$KOMODO_BASE_URL" ]; then
-                echo -e "${BLUE}Enter your Komodo base URL (e.g., https://komodo.example.com):${NC}"
-                read -p "Komodo Base URL: " KOMODO_BASE_URL
-                export KOMODO_BASE_URL
+                while true; do
+                    echo -e "${BLUE}Enter your Komodo base URL (e.g., https://komodo.example.com):${NC}"
+                    read -p "Komodo Base URL: " KOMODO_BASE_URL
+                    
+                    if [ -z "$KOMODO_BASE_URL" ]; then
+                        echo -e "${RED}Error: Base URL cannot be empty${NC}"
+                        continue
+                    fi
+                    
+                    # Remove trailing slash if present
+                    KOMODO_BASE_URL="${KOMODO_BASE_URL%/}"
+                    export KOMODO_BASE_URL
+                    break
+                done
             fi
+            
+            # Komodo API Key
             if [ -z "$KOMODO_API_KEY" ]; then
-                echo -e "${BLUE}Enter your Komodo API Key:${NC}"
-                read -p "Komodo API Key: " KOMODO_API_KEY
-                export KOMODO_API_KEY
+                while true; do
+                    echo -e "${BLUE}Enter your Komodo API Key:${NC}"
+                    read -p "Komodo API Key: " KOMODO_API_KEY
+                    
+                    if [ -z "$KOMODO_API_KEY" ]; then
+                        echo -e "${RED}Error: API Key cannot be empty${NC}"
+                        continue
+                    fi
+                    
+                    export KOMODO_API_KEY
+                    
+                    # If we have all three, validate
+                    if [ -n "$KOMODO_BASE_URL" ] && [ -n "$KOMODO_API_KEY" ] && [ -n "$KOMODO_API_SECRET" ]; then
+                        echo -e "${BLUE}Validating Komodo credentials...${NC}"
+                        komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"
+                        if komodo_validate_credentials; then
+                            echo -e "${GREEN}✓ Komodo credentials are valid${NC}"
+                            break
+                        else
+                            echo -e "${RED}✗ Komodo credentials are invalid${NC}"
+                            read -p "Would you like to try again? (Y/n): " retry
+                            if [[ $retry =~ ^[Nn]$ ]]; then
+                                echo -e "${YELLOW}Skipping Komodo automation...${NC}"
+                                KOMODO_API_KEY=""
+                                export KOMODO_API_KEY
+                                break
+                            fi
+                            KOMODO_API_KEY=""
+                            continue
+                        fi
+                    fi
+                    break
+                done
             fi
+            
+            # Komodo API Secret
             if [ -z "$KOMODO_API_SECRET" ]; then
-                echo -e "${BLUE}Enter your Komodo API Secret:${NC}"
-                read -p "Komodo API Secret: " KOMODO_API_SECRET
-                export KOMODO_API_SECRET
+                while true; do
+                    echo -e "${BLUE}Enter your Komodo API Secret:${NC}"
+                    read -p "Komodo API Secret: " KOMODO_API_SECRET
+                    
+                    if [ -z "$KOMODO_API_SECRET" ]; then
+                        echo -e "${RED}Error: API Secret cannot be empty${NC}"
+                        continue
+                    fi
+                    
+                    export KOMODO_API_SECRET
+                    
+                    # Validate all three together
+                    if [ -n "$KOMODO_BASE_URL" ] && [ -n "$KOMODO_API_KEY" ] && [ -n "$KOMODO_API_SECRET" ]; then
+                        echo -e "${BLUE}Validating Komodo credentials...${NC}"
+                        komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"
+                        if komodo_validate_credentials; then
+                            echo -e "${GREEN}✓ Komodo credentials are valid${NC}"
+                            break
+                        else
+                            echo -e "${RED}✗ Komodo credentials are invalid${NC}"
+                            read -p "Would you like to try again? (Y/n): " retry
+                            if [[ $retry =~ ^[Nn]$ ]]; then
+                                echo -e "${YELLOW}Skipping Komodo automation...${NC}"
+                                KOMODO_API_SECRET=""
+                                export KOMODO_API_SECRET
+                                break
+                            fi
+                            KOMODO_API_SECRET=""
+                            continue
+                        fi
+                    fi
+                    break
+                done
+            else
+                # Validate existing credentials
+                if [ -n "$KOMODO_BASE_URL" ] && [ -n "$KOMODO_API_KEY" ] && [ -n "$KOMODO_API_SECRET" ]; then
+                    echo -e "${BLUE}Validating existing Komodo credentials...${NC}"
+                    komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"
+                    if ! komodo_validate_credentials; then
+                        echo -e "${RED}✗ Existing Komodo credentials are invalid${NC}"
+                        KOMODO_BASE_URL=""
+                        KOMODO_API_KEY=""
+                        KOMODO_API_SECRET=""
+                        export KOMODO_BASE_URL KOMODO_API_KEY KOMODO_API_SECRET
+                        prompt_api_credentials
+                        return
+                    fi
+                fi
             fi
         fi
     fi
@@ -190,11 +397,26 @@ validate_api_credentials() {
         # Validate Cloudflare
         if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
             echo -e "${BLUE}Validating Cloudflare API token...${NC}"
-            if cloudflare_validate_token; then
-                echo -e "${GREEN}✓ Cloudflare API token is valid${NC}"
+            # Initialize Cloudflare API first
+            cloudflare_init "$CLOUDFLARE_API_TOKEN"
+            # Get account ID to use account-specific validation endpoint
+            account_id=$(cloudflare_get_account_id)
+            if [ -n "$account_id" ]; then
+                if cloudflare_validate_token "$account_id"; then
+                    echo -e "${GREEN}✓ Cloudflare API token is valid${NC}"
+                else
+                    echo -e "${RED}✗ Cloudflare API token is invalid${NC}"
+                    errors=$((errors + 1))
+                fi
             else
-                echo -e "${RED}✗ Cloudflare API token is invalid${NC}"
-                errors=$((errors + 1))
+                # Fallback to user endpoint if we can't get account ID
+                echo -e "${YELLOW}Warning: Could not get account ID, trying user endpoint...${NC}"
+                if cloudflare_validate_token; then
+                    echo -e "${GREEN}✓ Cloudflare API token is valid${NC}"
+                else
+                    echo -e "${RED}✗ Cloudflare API token is invalid${NC}"
+                    errors=$((errors + 1))
+                fi
             fi
         fi
         
@@ -261,8 +483,11 @@ cmd_init() {
         fi
     fi
     
-    # Prompt for automated mode if not specified
-    if [ "$automated_flag" = false ]; then
+    # Set automated mode if flag was provided
+    if [ "$automated_flag" = true ]; then
+        AUTOMATED_MODE=true
+    elif [ "$automated_flag" = false ]; then
+        # Only prompt if flag was not provided
         echo ""
         read -p "Do you want to use automated deployment (Cloudflare, GitHub, Komodo APIs)? (y/N): " use_automated
         if [[ $use_automated =~ ^[Yy]$ ]]; then
@@ -271,18 +496,9 @@ cmd_init() {
     fi
     
     # Prompt for API credentials if in automated mode
+    # Credentials are now validated as they're entered, so we don't need separate validation
     if [ "$AUTOMATED_MODE" = true ]; then
         prompt_api_credentials
-        
-        # Validate credentials
-        if ! validate_api_credentials; then
-            echo -e "${RED}Error: Some API credentials are invalid. Please check and try again.${NC}"
-            echo -e "${YELLOW}You can continue with manual setup, but automated features will not work.${NC}"
-            read -p "Continue anyway? (y/N): " continue_anyway
-            if [[ ! $continue_anyway =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
-        fi
     fi
     
     # Get site name

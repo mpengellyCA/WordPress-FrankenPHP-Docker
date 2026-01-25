@@ -227,25 +227,42 @@ cloudflare_create_dns_record() {
 }
 
 # Validate Cloudflare API token
-# Usage: cloudflare_validate_token
+# Usage: cloudflare_validate_token [account_id]
 # Returns: 0 if valid, 1 if invalid
 cloudflare_validate_token() {
+    local account_id="$1"
+    
     if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
         echo "Error: Cloudflare API token is not set" >&2
         return 1
     fi
     
-    local response=$(curl -s -w "\n%{http_code}" -X GET "${CLOUDFLARE_API_BASE}/user/tokens/verify" \
+    # Use account-specific endpoint if account_id is provided, otherwise use user endpoint
+    local endpoint
+    if [ -n "$account_id" ]; then
+        endpoint="${CLOUDFLARE_API_BASE}/accounts/${account_id}/tokens/verify"
+    else
+        endpoint="${CLOUDFLARE_API_BASE}/user/tokens/verify"
+    fi
+    
+    local response=$(curl -s -w "\n%{http_code}" -X GET "$endpoint" \
         -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
         -H "Content-Type: application/json")
     
     local http_code=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | sed '$d')
     
+    # Check for success in response
     if [ "$http_code" = "200" ] && echo "$body" | grep -q '"success":true'; then
         return 0
     else
-        echo "Invalid Cloudflare API token (HTTP $http_code)" >&2
+        # Try to extract error message
+        local error_msg=$(echo "$body" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$error_msg" ]; then
+            echo "Invalid Cloudflare API token: ${error_msg} (HTTP $http_code)" >&2
+        else
+            echo "Invalid Cloudflare API token (HTTP $http_code)" >&2
+        fi
         return 1
     fi
 }
