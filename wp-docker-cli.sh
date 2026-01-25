@@ -483,11 +483,12 @@ cmd_init() {
         fi
     fi
     
-    # Set automated mode if flag was provided
+    # Set automated mode based on flag
+    # If --automated flag was explicitly provided, always use automation (no prompt)
     if [ "$automated_flag" = true ]; then
         AUTOMATED_MODE=true
-    elif [ "$automated_flag" = false ]; then
-        # Only prompt if flag was not provided
+    else
+        # Only prompt if flag was not provided at all
         echo ""
         read -p "Do you want to use automated deployment (Cloudflare, GitHub, Komodo APIs)? (y/N): " use_automated
         if [[ $use_automated =~ ^[Yy]$ ]]; then
