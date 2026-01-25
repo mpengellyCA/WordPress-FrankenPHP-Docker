@@ -301,6 +301,9 @@ EOF
     
     if [ -z "$tunnel_id" ]; then
         echo -e "${YELLOW}No tunnel ID provided. You can add it later to .env file.${NC}"
+        # Create empty cloudflared directory structure
+        mkdir -p cloudflared
+        echo -e "${YELLOW}Note: Cloudflared config will be created when you add a tunnel ID.${NC}"
     else
         # Update .env with tunnel ID
         sed -i "s/TUNNEL_ID=$/TUNNEL_ID=${tunnel_id}/" .env
@@ -330,10 +333,6 @@ EOF
             envsubst < "$SCRIPT_DIR/cloudflared-config.yml.template" > cloudflared/config.yml
         fi
         echo -e "${GREEN}✓ Created cloudflared/config.yml${NC}"
-    else
-        # Create empty cloudflared directory structure
-        mkdir -p cloudflared
-        echo -e "${YELLOW}Note: Cloudflared config will be created when you add a tunnel ID.${NC}"
     fi
     
     print_section "Cloudflare DNS Configuration"
