@@ -1,0 +1,6 @@
+config/api-credentials
+config/api-credentials.enc
+config/api-credentials.tmp
+.env
+docker-compose.yml
+config/komodo-compose.yml

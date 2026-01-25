@@ -1,18 +1,8 @@
 #!/bin/bash
 set -e
 
-# Wait for database to be ready
-if [ -n "$WORDPRESS_DB_HOST" ]; then
-    echo "Waiting for database connection..."
-    until php -r "new PDO('mysql:host=${WORDPRESS_DB_HOST};port=${WORDPRESS_DB_PORT:-3306}', '${WORDPRESS_DB_USER}', '${WORDPRESS_DB_PASSWORD}');" 2>/dev/null; do
-        echo "Database is unavailable - sleeping"
-        sleep 2
-    done
-    echo "Database is ready!"
-fi
-
-# Create wp-config.php if it doesn't exist
-if [ ! -f /var/www/html/wp-config.php ] && [ -n "$WORDPRESS_DB_NAME" ]; then
+# Create wp-config.php on every boot (from env)
+if [ -n "$WORDPRESS_DB_NAME" ]; then
     echo "Creating wp-config.php..."
     
     # Download wp-config-sample.php if needed
@@ -72,6 +62,63 @@ if [ ! -f /var/www/html/wp-config.php ] && [ -n "$WORDPRESS_DB_NAME" ]; then
     chmod 644 /var/www/html/wp-config.php
     
     echo "wp-config.php created successfully"
+fi
+
+# Wait for database to be ready
+if [ -n "$WORDPRESS_DB_HOST" ]; then
+    echo "Waiting for database connection..."
+    until php -r "new PDO('mysql:host=${WORDPRESS_DB_HOST};port=${WORDPRESS_DB_PORT:-3306}', '${WORDPRESS_DB_USER}', '${WORDPRESS_DB_PASSWORD}');" 2>/dev/null; do
+        echo "Database is unavailable - sleeping"
+        sleep 2
+    done
+    echo "Database is ready!"
+fi
+
+# Ensure WordPress correctly detects HTTPS when behind a reverse proxy (e.g., Cloudflare Tunnel).
+# This prevents wp-admin redirect loops when the origin connection is HTTP but the client connection is HTTPS.
+if [ -f /var/www/html/wp-config.php ]; then
+    if ! grep -q "WP_PROXY_HTTPS_FIX" /var/www/html/wp-config.php; then
+        echo "Injecting reverse-proxy HTTPS fix into wp-config.php..."
+        tmpfile="$(mktemp)"
+        awk '
+            BEGIN { inserted=0 }
+            # Insert before the canonical "stop editing" marker if present
+            /\/\* That\x27s all, stop editing! Happy publishing\. \*\// && inserted==0 {
+                print ""
+                print "// WP_PROXY_HTTPS_FIX: reverse proxy / Cloudflare Tunnel HTTPS detection"
+                print "if ("
+                print "    (!empty($_SERVER[\"HTTP_X_FORWARDED_PROTO\"]) && $_SERVER[\"HTTP_X_FORWARDED_PROTO\"] === \"https\") ||"
+                print "    (!empty($_SERVER[\"HTTP_CF_VISITOR\"]) && strpos($_SERVER[\"HTTP_CF_VISITOR\"], \"\\\"https\\\"\") !== false)"
+                print ") {"
+                print "    $_SERVER[\"HTTPS\"] = \"on\";"
+                print "    $_SERVER[\"SERVER_PORT\"] = 443;"
+                print "}"
+                print ""
+                print "if (!defined(\"FORCE_SSL_ADMIN\")) define(\"FORCE_SSL_ADMIN\", true);"
+                print ""
+                inserted=1
+            }
+            { print }
+            END {
+                if (inserted==0) {
+                    print ""
+                    print "// WP_PROXY_HTTPS_FIX: reverse proxy / Cloudflare Tunnel HTTPS detection"
+                    print "if ("
+                    print "    (!empty($_SERVER[\"HTTP_X_FORWARDED_PROTO\"]) && $_SERVER[\"HTTP_X_FORWARDED_PROTO\"] === \"https\") ||"
+                    print "    (!empty($_SERVER[\"HTTP_CF_VISITOR\"]) && strpos($_SERVER[\"HTTP_CF_VISITOR\"], \"\\\"https\\\"\") !== false)"
+                    print ") {"
+                    print "    $_SERVER[\"HTTPS\"] = \"on\";"
+                    print "    $_SERVER[\"SERVER_PORT\"] = 443;"
+                    print "}"
+                    print ""
+                    print "if (!defined(\"FORCE_SSL_ADMIN\")) define(\"FORCE_SSL_ADMIN\", true);"
+                    print ""
+                }
+            }
+        ' /var/www/html/wp-config.php > "$tmpfile"
+        cat "$tmpfile" > /var/www/html/wp-config.php
+        rm -f "$tmpfile"
+    fi
 fi
 
 # Set proper permissions

@@ -1,0 +1,10 @@
+{
+    # Global options
+    admin off
+}
+
+:80 {
+    root * /var/www/html
+    php_server
+    file_server
+}

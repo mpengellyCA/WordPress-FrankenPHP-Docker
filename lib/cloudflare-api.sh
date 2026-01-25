@@ -99,18 +99,11 @@ cloudflare_create_tunnel() {
     
     if [ -z "$tunnel_id" ]; then
         local error_msg=$(echo "$response" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
-        # Check if tunnel already exists
-        if echo "$response" | grep -q "already exists"; then
-            echo "Tunnel '${tunnel_name}' already exists. Attempting to retrieve existing tunnel..." >&2
-            # Try to get existing tunnel ID
-            local existing_response=$(curl -s -X GET "${CLOUDFLARE_API_BASE}/accounts/${account_id}/cfd_tunnel?name=${tunnel_name}" \
-                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-                -H "Content-Type: application/json")
-            tunnel_id=$(echo "$existing_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-            if [ -n "$tunnel_id" ]; then
-                echo "$tunnel_id"
-                return 0
-            fi
+        # Check if tunnel already exists (various error messages)
+        if echo "$response" | grep -qiE "(already exists|already have a tunnel)"; then
+            # Just report the conflict, don't auto-retrieve
+            echo "TUNNEL_EXISTS:${tunnel_name}" >&2
+            return 3  # Return code 3 indicates tunnel exists (conflict)
         fi
         echo "Error creating tunnel: ${error_msg:-Unknown error}" >&2
         echo "" >&2
@@ -118,6 +111,107 @@ cloudflare_create_tunnel() {
     fi
     
     echo "$tunnel_id"
+    return 0
+}
+
+# List all tunnels for an account
+# Usage: cloudflare_list_tunnels <account_id>
+# Returns: JSON array of tunnels
+cloudflare_list_tunnels() {
+    local account_id="$1"
+    
+    if [ -z "$account_id" ] || [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+        return 1
+    fi
+    
+    local response=$(curl -s -X GET "${CLOUDFLARE_API_BASE}/accounts/${account_id}/cfd_tunnel" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json")
+    
+    echo "$response"
+}
+
+# Get tunnel by name
+# Usage: cloudflare_get_tunnel_by_name <tunnel_name> <account_id>
+# Returns: tunnel_id or empty string
+cloudflare_get_tunnel_by_name() {
+    local tunnel_name="$1"
+    local account_id="$2"
+    
+    if [ -z "$tunnel_name" ] || [ -z "$account_id" ] || [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+        return 1
+    fi
+    
+    local response=$(curl -s -X GET "${CLOUDFLARE_API_BASE}/accounts/${account_id}/cfd_tunnel?name=${tunnel_name}" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json")
+    
+    local tunnel_id=$(echo "$response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    
+    if [ -n "$tunnel_id" ]; then
+        echo "$tunnel_id"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Delete a tunnel
+# Usage: cloudflare_delete_tunnel <tunnel_id> <account_id>
+# Returns: 0 on success, 1 on error
+cloudflare_delete_tunnel() {
+    local tunnel_id="$1"
+    local account_id="$2"
+    
+    if [ -z "$tunnel_id" ] || [ -z "$account_id" ] || [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+        return 1
+    fi
+    
+    local response=$(curl -s -w "\n%{http_code}" -X DELETE "${CLOUDFLARE_API_BASE}/accounts/${account_id}/cfd_tunnel/${tunnel_id}" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json")
+    
+    local http_code=$(echo "$response" | tail -n1)
+    
+    if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+        return 0
+    else
+        local error_msg=$(echo "$response" | sed '$d' | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
+        echo "Error deleting tunnel: ${error_msg:-Unknown error (HTTP $http_code)}" >&2
+        return 1
+    fi
+}
+
+# Get tunnel token
+# Usage: cloudflare_get_tunnel_token <tunnel_id> <account_id>
+# Returns: tunnel token or empty string on error
+cloudflare_get_tunnel_token() {
+    local tunnel_id="$1"
+    local account_id="$2"
+    
+    if [ -z "$tunnel_id" ] || [ -z "$account_id" ] || [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+        return 1
+    fi
+    
+    local response=$(curl -s -X GET "${CLOUDFLARE_API_BASE}/accounts/${account_id}/cfd_tunnel/${tunnel_id}/token" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json")
+    
+    local token=$(echo "$response" | grep -o '"result":"[^"]*"' | head -1 | cut -d'"' -f4)
+    
+    if [ -n "$token" ]; then
+        echo "$token"
+        return 0
+    else
+        # Try alternative response format
+        token=$(echo "$response" | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$token" ]; then
+            echo "$token"
+            return 0
+        fi
+    fi
+    
+    return 1
 }
 
 # Get tunnel credentials JSON

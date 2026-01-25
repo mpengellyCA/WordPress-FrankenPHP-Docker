@@ -124,15 +124,23 @@ Run the init command with `--automated` flag and enter credentials when prompted
 ./wp-docker-cli.sh init --automated
 ```
 
-#### Option 2: Configuration File
+#### Option 2: Configuration File (Encrypted with PIN)
 
-Create `config/api-credentials` from the example:
+The tool supports PIN-based encryption for secure credential storage:
 
+1. **First time setup**: When you enter credentials during `init --automated`, you'll be prompted to create a PIN to encrypt them
+2. **Subsequent uses**: Enter your PIN to unlock encrypted credentials
+
+The encrypted file is stored at `config/api-credentials.enc` and requires your PIN to decrypt.
+
+**Manual setup** (unencrypted):
 ```bash
 cp config/api-credentials.example config/api-credentials
 chmod 600 config/api-credentials
 # Edit config/api-credentials with your credentials
 ```
+
+**Note**: The tool will automatically prompt to encrypt unencrypted credential files when detected.
 
 #### Option 3: Environment Variables
 
@@ -180,15 +188,19 @@ Get your API key and secret from your Komodo instance:
 
 The tool will:
 - Prompt for API credentials (if not already configured)
-- Validate all credentials
+- Validate each credential as it's entered
+- Prompt to create a PIN for encrypting credentials (recommended)
 - Automatically create Cloudflare tunnel
 - Automatically create DNS record
-- Optionally build and push Docker image
+- Build and push Docker image to GitHub Container Registry
+- Automatically deploy to Komodo if Komodo credentials are configured
 - Generate all configuration files
 
-#### Deploy to Komodo
+**PIN Protection**: When saving credentials, you'll be prompted to create a PIN. This PIN encrypts your credentials using AES-256 encryption. You'll need to enter this PIN each time you run the tool to unlock your credentials.
 
-After initialization, deploy your stack to Komodo:
+#### Deploy to Komodo (Manual Trigger)
+
+If you need to redeploy later (or skipped Komodo during init), run:
 
 ```bash
 ./wp-docker-cli.sh deploy [server_name]
@@ -360,7 +372,9 @@ WordPress-FrankenPHP-Docker/
 │   ├── github-api.sh              # GitHub API wrapper
 │   └── komodo-api.sh               # Komodo API wrapper
 ├── config/                        # Configuration files
-│   └── api-credentials.example    # API credentials template
+│   ├── api-credentials.example    # API credentials template
+│   ├── api-credentials            # Unencrypted credentials (if not using PIN)
+│   └── api-credentials.enc        # Encrypted credentials (PIN-protected)
 ├── .env.example                   # Example environment variables
 ├── .dockerignore                  # Files to exclude from Docker build
 └── README.md                      # This file

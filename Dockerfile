@@ -8,6 +8,25 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     wget \
     unzip \
+    libfreetype6-dev \
+    libjpeg62-turbo-dev \
+    libpng-dev \
+    libwebp-dev \
+    libzip-dev \
+    libicu-dev \
+    libxml2-dev \
+    libonig-dev \
+    libexif-dev \
+    libcurl4-openssl-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
+    && docker-php-ext-install \
+        pdo_mysql \
+        mysqli \
+        gd \
+        zip \
+        intl \
+        exif \
+        bcmath \
     && rm -rf /var/lib/apt/lists/*
 
 # Download latest WordPress
@@ -26,5 +45,7 @@ RUN chown -R www-data:www-data /var/www/html
 EXPOSE 80
 
 # Use entrypoint script
+COPY Caddyfile /etc/frankenphp/Caddyfile
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["frankenphp", "run", "--public", "/var/www/html"]
+CMD ["frankenphp", "run", "--config", "/etc/frankenphp/Caddyfile"]

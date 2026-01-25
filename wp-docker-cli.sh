@@ -26,6 +26,31 @@ fi
 # Global flags
 AUTOMATED_MODE=false
 DRY_RUN=false
+CREDENTIALS_UNLOCKED=false
+
+# Cleanup function for temporary credential files
+cleanup_temp_files() {
+    # Clean up any temporary credential files
+    rm -f config/api-credentials.tmp 2>/dev/null || true
+    rm -f config/api-credentials.existing.tmp 2>/dev/null || true
+    rm -f config/api-credentials.merged.tmp 2>/dev/null || true
+    rm -f config/api-credentials.enc.new 2>/dev/null || true
+    rm -f config/api-credentials.verify.tmp 2>/dev/null || true
+    rm -f config/api-credentials 2>/dev/null || true
+}
+
+# Trap handler for interruptions
+handle_interrupt() {
+    echo ""
+    echo -e "${YELLOW}Process interrupted. Cleaning up...${NC}"
+    cleanup_temp_files
+    echo -e "${BLUE}Note: Any credentials entered and validated have been saved.${NC}"
+    echo -e "${BLUE}Run the script again to continue or add missing credentials.${NC}"
+    exit 130
+}
+
+# Set up trap for SIGINT (Ctrl+C) and SIGTERM
+trap handle_interrupt SIGINT SIGTERM
 
 # Generate secure random password
 generate_password() {
@@ -111,16 +136,251 @@ install_package() {
     return 1
 }
 
+# Encrypt credentials file with PIN
+# Usage: encrypt_credentials <credentials_file> <encrypted_file>
+encrypt_credentials() {
+    local credentials_file="$1"
+    local encrypted_file="$2"
+    local pin="$3"
+    
+    if [ -z "$credentials_file" ] || [ -z "$encrypted_file" ] || [ -z "$pin" ]; then
+        echo "Error: All parameters required for encryption" >&2
+        return 1
+    fi
+    
+    if [ ! -f "$credentials_file" ]; then
+        echo "Error: Credentials file not found" >&2
+        return 1
+    fi
+    
+    # Use openssl to encrypt with the PIN as the key (using PBKDF2)
+    echo "$pin" | openssl enc -aes-256-cbc -pbkdf2 -salt -in "$credentials_file" -out "$encrypted_file" -pass stdin 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        # Remove the unencrypted file
+        rm -f "$credentials_file"
+        chmod 600 "$encrypted_file"
+        return 0
+    else
+        echo "Error: Failed to encrypt credentials" >&2
+        return 1
+    fi
+}
+
+# Decrypt credentials file with PIN
+# Usage: decrypt_credentials <encrypted_file> <output_file>
+decrypt_credentials() {
+    local encrypted_file="$1"
+    local output_file="$2"
+    local pin="$3"
+    
+    if [ -z "$encrypted_file" ] || [ -z "$output_file" ] || [ -z "$pin" ]; then
+        echo "Error: All parameters required for decryption" >&2
+        return 1
+    fi
+    
+    if [ ! -f "$encrypted_file" ]; then
+        echo "Error: Encrypted credentials file not found" >&2
+        return 1
+    fi
+    
+    # Use openssl to decrypt with the PIN as the key
+    echo "$pin" | openssl enc -aes-256-cbc -pbkdf2 -d -salt -in "$encrypted_file" -out "$output_file" -pass stdin 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        chmod 600 "$output_file"
+        return 0
+    else
+        echo "Error: Failed to decrypt credentials (wrong PIN or corrupted file)" >&2
+        rm -f "$output_file"
+        return 1
+    fi
+}
+
+# Check if encrypted credentials file is valid and accessible
+# Usage: verify_encrypted_credentials <encrypted_file> <pin>
+verify_encrypted_credentials() {
+    local encrypted_file="$1"
+    local pin="$2"
+    local temp_verify="config/api-credentials.verify.tmp"
+    
+    if [ ! -f "$encrypted_file" ]; then
+        return 1
+    fi
+    
+    if decrypt_credentials "$encrypted_file" "$temp_verify" "$pin"; then
+        rm -f "$temp_verify"
+        return 0
+    else
+        rm -f "$temp_verify"
+        return 1
+    fi
+}
+
+# Unlock credentials with provided PIN
+# Usage: unlock_credentials_with_pin <pin>
+# Returns: 0 on success, 1 on failure
+unlock_credentials_with_pin() {
+    local pin="$1"
+    local encrypted_file="config/api-credentials.enc"
+    local temp_file="config/api-credentials.tmp"
+    
+    if [ ! -f "$encrypted_file" ] || [ -z "$pin" ]; then
+        return 1
+    fi
+    
+    if decrypt_credentials "$encrypted_file" "$temp_file" "$pin"; then
+        # Load decrypted credentials into current shell
+        set -a
+        source "$temp_file" 2>/dev/null || true
+        set +a
+        
+        # Export credentials to make sure they're available
+        export CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+        export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+        export GITHUB_USERNAME="${GITHUB_USERNAME:-${GITHUB_USER:-}}"
+        export KOMODO_BASE_URL="${KOMODO_BASE_URL:-}"
+        export KOMODO_API_KEY="${KOMODO_API_KEY:-}"
+        export KOMODO_API_SECRET="${KOMODO_API_SECRET:-}"
+        
+        # Track unlocked state and keep the PIN for this session
+        export PIN="${PIN:-$pin}"
+        CREDENTIALS_UNLOCKED=true
+
+        # Clean up temp file after a short delay to ensure it's loaded
+        # (Don't delete immediately in case we need to reference it)
+        # Actually, let's keep it for now in case we need to merge more credentials
+
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Prompt for PIN and decrypt credentials (with retry)
+# Usage: unlock_credentials
+# Returns: 0 on success, 1 on failure
+unlock_credentials() {
+    local encrypted_file="config/api-credentials.enc"
+    
+    if [ ! -f "$encrypted_file" ]; then
+        return 1
+    fi
+    
+    local max_attempts=3
+    local attempts=0
+    
+    while [ $attempts -lt $max_attempts ]; do
+        echo ""
+        echo -e "${BLUE}Enter PIN to unlock encrypted credentials:${NC}"
+        read -s -p "PIN: " pin
+        echo ""
+        
+        if unlock_credentials_with_pin "$pin"; then
+            export PIN="$pin"
+            CREDENTIALS_UNLOCKED=true
+            echo -e "${GREEN}✓ Credentials unlocked${NC}"
+            return 0
+        else
+            attempts=$((attempts + 1))
+            remaining=$((max_attempts - attempts))
+            if [ $remaining -gt 0 ]; then
+                echo -e "${RED}Invalid PIN. ${remaining} attempt(s) remaining.${NC}"
+            else
+                echo -e "${RED}Maximum attempts reached. Cannot unlock credentials.${NC}"
+                return 1
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Prompt to create PIN and encrypt credentials
+# Usage: create_pin_and_encrypt
+create_pin_and_encrypt() {
+    local credentials_file="config/api-credentials"
+    local encrypted_file="config/api-credentials.enc"
+    
+    if [ ! -f "$credentials_file" ]; then
+        echo "Error: No credentials file to encrypt" >&2
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${BLUE}Create a PIN to encrypt your API credentials:${NC}"
+    echo -e "${YELLOW}(This PIN will be required to unlock credentials in the future)${NC}"
+    
+    while true; do
+        read -s -p "Enter PIN: " pin1
+        echo ""
+        
+        if [ -z "$pin1" ]; then
+            echo -e "${RED}Error: PIN cannot be empty${NC}"
+            continue
+        fi
+        
+        if [ ${#pin1} -lt 4 ]; then
+            echo -e "${RED}Error: PIN must be at least 4 characters${NC}"
+            continue
+        fi
+        
+        read -s -p "Confirm PIN: " pin2
+        echo ""
+        
+        if [ "$pin1" != "$pin2" ]; then
+            echo -e "${RED}Error: PINs do not match. Please try again.${NC}"
+            continue
+        fi
+        
+        # Encrypt the credentials
+        if encrypt_credentials "$credentials_file" "$encrypted_file" "$pin1"; then
+            echo -e "${GREEN}✓ Credentials encrypted and stored securely${NC}"
+            echo -e "${YELLOW}Remember your PIN - you'll need it to unlock credentials!${NC}"
+            return 0
+        else
+            echo -e "${RED}Error: Failed to encrypt credentials${NC}"
+            return 1
+        fi
+    done
+}
+
 # Load API credentials from environment or config file
 load_api_credentials() {
-    # Try to load from config file first
-    if [ -f "config/api-credentials" ]; then
+    local encrypted_file="config/api-credentials.enc"
+    local unencrypted_file="config/api-credentials"
+    
+    # Environment variables take precedence (don't load from file if env vars are set)
+    if [ -n "$CLOUDFLARE_API_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -n "$KOMODO_API_KEY" ]; then
+        # User has provided credentials via environment, use those
+        export CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+        export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+        export GITHUB_USERNAME="${GITHUB_USERNAME:-${GITHUB_USER:-}}"
+        export KOMODO_BASE_URL="${KOMODO_BASE_URL:-}"
+        export KOMODO_API_KEY="${KOMODO_API_KEY:-}"
+        export KOMODO_API_SECRET="${KOMODO_API_SECRET:-}"
+        return 0
+    fi
+    
+    # Check for encrypted credentials first
+    if [ -f "$encrypted_file" ]; then
+        echo -e "${BLUE}Encrypted credentials found.${NC}"
+        if unlock_credentials; then
+            # Credentials are now loaded via unlock_credentials
+            return 0
+        else
+            echo -e "${YELLOW}Failed to unlock credentials. Continuing without them...${NC}"
+        fi
+    fi
+    
+    # Try to load from unencrypted config file (for backward compatibility)
+    if [ -f "$unencrypted_file" ]; then
         set -a
-        source "config/api-credentials" 2>/dev/null || true
+        source "$unencrypted_file" 2>/dev/null || true
         set +a
     fi
     
-    # Environment variables take precedence
+    # Export any loaded credentials
     export CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
     export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
     export GITHUB_USERNAME="${GITHUB_USERNAME:-${GITHUB_USER:-}}"
@@ -129,16 +389,321 @@ load_api_credentials() {
     export KOMODO_API_SECRET="${KOMODO_API_SECRET:-}"
 }
 
+# Check which credentials are saved and display status
+check_saved_credentials_status() {
+    local has_cloudflare=false
+    local has_github=false
+    local has_komodo=false
+    
+    if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+        has_cloudflare=true
+    fi
+    
+    if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_USERNAME" ]; then
+        has_github=true
+    fi
+    
+    if [ -n "$KOMODO_BASE_URL" ] && [ -n "$KOMODO_API_KEY" ] && [ -n "$KOMODO_API_SECRET" ]; then
+        has_komodo=true
+    fi
+    
+    # Display status
+    echo ""
+    echo -e "${BLUE}=== Saved Credentials Status ===${NC}"
+    
+    if [ "$has_cloudflare" = true ]; then
+        echo -e "${GREEN}✓ Cloudflare API Token${NC}"
+    else
+        echo -e "${YELLOW}✗ Cloudflare API Token (missing)${NC}"
+    fi
+    
+    if [ "$has_github" = true ]; then
+        echo -e "${GREEN}✓ GitHub Token & Username${NC}"
+    else
+        echo -e "${YELLOW}✗ GitHub Token & Username (missing)${NC}"
+    fi
+    
+    if [ "$has_komodo" = true ]; then
+        echo -e "${GREEN}✓ Komodo Credentials${NC}"
+    else
+        echo -e "${YELLOW}  Komodo Credentials (not configured)${NC}"
+    fi
+    
+    echo ""
+    
+    # Return codes: 0 = complete, 1 = incomplete, 2 = none
+    if [ "$has_cloudflare" = true ] && [ "$has_github" = true ]; then
+        return 0  # Complete (Komodo is optional)
+    elif [ "$has_cloudflare" = true ] || [ "$has_github" = true ] || [ "$has_komodo" = true ]; then
+        return 1  # Incomplete
+    else
+        return 2  # None
+    fi
+}
+
+# Ask if user wants to use saved credentials
+ask_use_saved_credentials() {
+    # Check status and display
+    check_saved_credentials_status
+    local status=$?
+    
+    if [ $status -eq 2 ]; then
+        # No credentials at all
+        return 1
+    elif [ $status -eq 1 ]; then
+        # Incomplete credentials
+        echo -e "${YELLOW}⚠ Warning: Saved credentials are incomplete!${NC}"
+        echo ""
+        echo "What would you like to do?"
+        echo "1) Keep existing and add missing credentials"
+        echo "2) Replace all credentials"
+        echo "3) Cancel and exit"
+        read -p "Choose an option (1-3): " choice
+        
+        case "$choice" in
+            1)
+                echo -e "${GREEN}Will keep existing credentials and prompt for missing ones.${NC}"
+                return 0  # Use saved and add missing
+                ;;
+            2)
+                echo -e "${YELLOW}Will prompt for all new credentials.${NC}"
+                # Clear all credentials
+                export CLOUDFLARE_API_TOKEN=""
+                export GITHUB_TOKEN=""
+                export GITHUB_USERNAME=""
+                export KOMODO_BASE_URL=""
+                export KOMODO_API_KEY=""
+                export KOMODO_API_SECRET=""
+                return 1  # Don't use saved
+                ;;
+            *)
+                echo -e "${RED}Cancelled.${NC}"
+                exit 0
+                ;;
+        esac
+    else
+        # Complete credentials
+        echo -e "${GREEN}All required credentials are saved.${NC}"
+        read -p "Do you want to use the saved credentials? (Y/n): " use_saved
+        if [[ ! $use_saved =~ ^[Nn]$ ]]; then
+            return 0  # Use saved credentials
+        else
+            # Clear saved credentials to prompt for new ones
+            export CLOUDFLARE_API_TOKEN=""
+            export GITHUB_TOKEN=""
+            export GITHUB_USERNAME=""
+            export KOMODO_BASE_URL=""
+            export KOMODO_API_KEY=""
+            export KOMODO_API_SECRET=""
+            return 1  # Don't use saved, prompt for new
+        fi
+    fi
+}
+
+# Store a credential and immediately save to encrypted file
+store_credential() {
+    local key="$1"
+    local value="$2"
+    local temp_creds_file="config/api-credentials.tmp"
+    local encrypted_file="config/api-credentials.enc"
+    local backup_file="config/api-credentials.enc.backup"
+    
+    mkdir -p config
+    
+    if [ -z "$PIN" ]; then
+        echo "Error: PIN not set, cannot store credential" >&2
+        return 1
+    fi
+    
+    if [ -z "$key" ] || [ -z "$value" ]; then
+        echo "Error: Key and value required" >&2
+        return 1
+    fi
+    
+    # Backup existing encrypted file if it exists (for recovery)
+    if [ -f "$encrypted_file" ]; then
+        cp "$encrypted_file" "$backup_file" 2>/dev/null || true
+    fi
+    
+    # Merge with existing credentials
+    local merged_file="config/api-credentials.merged.tmp"
+    
+    if [ -f "$encrypted_file" ]; then
+        # Decrypt existing file to merge
+        local existing_temp="config/api-credentials.existing.tmp"
+        if decrypt_credentials "$encrypted_file" "$existing_temp" "$PIN"; then
+            # Start with existing credentials, removing the key we're updating
+            grep -v "^${key}=" "$existing_temp" > "$merged_file" 2>/dev/null || touch "$merged_file"
+            rm -f "$existing_temp"
+        else
+            echo "Warning: Could not decrypt existing credentials for merge" >&2
+            touch "$merged_file"
+        fi
+    else
+        touch "$merged_file"
+    fi
+    
+    # Add the new/updated credential
+    echo "${key}=\"${value}\"" >> "$merged_file"
+    
+    # Create final credentials file with header
+    local final_creds_file="config/api-credentials"
+    cat > "$final_creds_file" <<EOF
+# API Credentials (auto-generated)
+# Keep this file secure and do not commit it to version control
+# Last updated: $(date)
+
+EOF
+    cat "$merged_file" >> "$final_creds_file"
+    
+    # Encrypt and save atomically
+    local temp_encrypted="config/api-credentials.enc.new"
+    if encrypt_credentials "$final_creds_file" "$temp_encrypted" "$PIN"; then
+        # Atomic move
+        mv "$temp_encrypted" "$encrypted_file"
+        rm -f "$merged_file" "$backup_file"
+        echo -e "${GREEN}✓ Saved: ${key}${NC}" >&2
+        return 0
+    else
+        echo "Error: Failed to save credential" >&2
+        # Restore backup if it exists
+        if [ -f "$backup_file" ]; then
+            mv "$backup_file" "$encrypted_file"
+            echo "Restored previous credentials from backup" >&2
+        fi
+        rm -f "$merged_file" "$temp_encrypted"
+        return 1
+    fi
+}
+
+# Encrypt and save all collected credentials
+save_encrypted_credentials() {
+    local temp_creds_file="config/api-credentials.tmp"
+    local encrypted_file="config/api-credentials.enc"
+    local pin="$1"
+    
+    if [ ! -f "$temp_creds_file" ]; then
+        return 1
+    fi
+    
+    # Add header comment
+    local final_creds_file="config/api-credentials"
+    cat > "$final_creds_file" <<EOF
+# API Credentials (auto-generated)
+# Keep this file secure and do not commit it to version control
+
+EOF
+    cat "$temp_creds_file" >> "$final_creds_file"
+    
+    # Encrypt it
+    if encrypt_credentials "$final_creds_file" "$encrypted_file" "$pin"; then
+        rm -f "$temp_creds_file"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Prompt for PIN (first thing in automated mode)
+prompt_for_pin() {
+    local encrypted_file="config/api-credentials.enc"
+    
+    # If encrypted file exists, we need PIN to unlock
+    if [ -f "$encrypted_file" ]; then
+        echo ""
+        echo -e "${BLUE}Enter PIN to unlock encrypted credentials:${NC}"
+        read -s -p "PIN: " PIN
+        echo ""
+        export PIN
+        return 0
+    else
+        # No encrypted file, need to create PIN for new credentials
+        echo ""
+        echo -e "${BLUE}Create a PIN to encrypt and store your API credentials:${NC}"
+        echo -e "${YELLOW}(This PIN will be required to unlock credentials in the future)${NC}"
+        
+        while true; do
+            read -s -p "Enter PIN: " pin1
+            echo ""
+            
+            if [ -z "$pin1" ]; then
+                echo -e "${RED}Error: PIN cannot be empty${NC}"
+                continue
+            fi
+            
+            if [ ${#pin1} -lt 4 ]; then
+                echo -e "${RED}Error: PIN must be at least 4 characters${NC}"
+                continue
+            fi
+            
+            read -s -p "Confirm PIN: " pin2
+            echo ""
+            
+            if [ "$pin1" != "$pin2" ]; then
+                echo -e "${RED}Error: PINs do not match. Please try again.${NC}"
+                continue
+            fi
+            
+            export PIN="$pin1"
+            return 0
+        done
+    fi
+}
+
 # Prompt for API credentials if not set
 prompt_api_credentials() {
     if [ "$AUTOMATED_MODE" = true ]; then
+        # Ask for PIN first unless credentials already unlocked
+        if [ "$CREDENTIALS_UNLOCKED" != true ]; then
+            if [ -z "$PIN" ] && ! prompt_for_pin; then
+                echo -e "${RED}Failed to set up PIN. Cannot proceed with credential storage.${NC}"
+                return 1
+            fi
+        fi
+
+        # If we have a PIN and encrypted file exists, try to unlock (once)
+        if [ -n "$PIN" ] && [ -f "config/api-credentials.enc" ] && [ "$CREDENTIALS_UNLOCKED" != true ]; then
+            echo -e "${BLUE}Unlocking saved credentials...${NC}"
+            if unlock_credentials_with_pin "$PIN"; then
+                echo -e "${GREEN}✓ Credentials unlocked${NC}"
+
+                # Ask if user wants to use saved credentials (shows status)
+                if ask_use_saved_credentials; then
+                    # User chose to keep/use saved credentials
+                    # Don't return yet - we'll continue to prompt for missing ones
+                    echo ""
+                else
+                    # User chose to replace all or cancelled
+                    # If they cancelled, ask_use_saved_credentials will exit
+                    # Otherwise credentials are cleared, continue to prompt for all
+                    echo ""
+                fi
+            else
+                echo -e "${RED}Failed to unlock with PIN. Will prompt for new credentials.${NC}"
+                # Clear any partial credentials that might have loaded
+                export CLOUDFLARE_API_TOKEN=""
+                export GITHUB_TOKEN=""
+                export GITHUB_USERNAME=""
+                export KOMODO_BASE_URL=""
+                export KOMODO_API_KEY=""
+                export KOMODO_API_SECRET=""
+            fi
+        elif [ "$CREDENTIALS_UNLOCKED" = true ]; then
+            # Credentials already unlocked via load_api_credentials()
+            if ask_use_saved_credentials; then
+                echo ""
+            else
+                echo ""
+            fi
+        fi
+        
         print_section "API Credentials Configuration"
         
         # Cloudflare API Token
         if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             while true; do
                 echo -e "${BLUE}Enter your Cloudflare API Token:${NC}"
-                echo -e "${YELLOW}(Required permissions: Zone:Read, Zone:Edit, Account:Cloudflare Tunnel:Edit)${NC}"
+                echo -e "${YELLOW}(Required permissions: Zone:Read, Zone:DNS:Edit, Account:Cloudflare Tunnel:Edit)${NC}"
                 read -p "Cloudflare API Token: " CLOUDFLARE_API_TOKEN
                 
                 if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
@@ -155,6 +720,8 @@ prompt_api_credentials() {
                 if [ -n "$account_id" ]; then
                     if cloudflare_validate_token "$account_id"; then
                         echo -e "${GREEN}✓ Cloudflare API token is valid${NC}"
+                        # Store the validated credential
+                        store_credential "CLOUDFLARE_API_TOKEN" "$CLOUDFLARE_API_TOKEN"
                         break
                     else
                         echo -e "${RED}✗ Cloudflare API token is invalid${NC}"
@@ -203,6 +770,21 @@ prompt_api_credentials() {
             fi
         fi
         
+        # GitHub Username (prompt first if needed, as it's required for token validation)
+        if [ -z "$GITHUB_USERNAME" ] && [ -z "$GITHUB_USER" ]; then
+            echo ""
+            echo -e "${BLUE}Enter your GitHub username:${NC}"
+            read -p "GitHub Username: " GITHUB_USERNAME
+            export GITHUB_USERNAME
+            # Store username immediately (it's not sensitive)
+            if [ -n "$GITHUB_USERNAME" ]; then
+                store_credential "GITHUB_USERNAME" "$GITHUB_USERNAME"
+            fi
+        elif [ -n "$GITHUB_USER" ] && [ -z "$GITHUB_USERNAME" ]; then
+            export GITHUB_USERNAME="$GITHUB_USER"
+            store_credential "GITHUB_USERNAME" "$GITHUB_USERNAME"
+        fi
+        
         # GitHub Token
         if [ -z "$GITHUB_TOKEN" ]; then
             while true; do
@@ -219,16 +801,22 @@ prompt_api_credentials() {
                 export GITHUB_TOKEN
                 echo -e "${BLUE}Validating GitHub token...${NC}"
                 
-                # Initialize GitHub API (username not required for validation)
-                if [ -n "$GITHUB_USERNAME" ]; then
-                    github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
-                else
-                    # Use a placeholder username for validation
-                    github_init "$GITHUB_TOKEN" "placeholder"
+                # Initialize GitHub API with username (required)
+                if [ -z "$GITHUB_USERNAME" ]; then
+                    echo -e "${RED}Error: GitHub username is required for validation${NC}"
+                    GITHUB_TOKEN=""
+                    continue
                 fi
+                
+                github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
                 
                 if github_validate_token; then
                     echo -e "${GREEN}✓ GitHub token is valid${NC}"
+                    # Store the validated credentials
+                    store_credential "GITHUB_TOKEN" "$GITHUB_TOKEN"
+                    if [ -n "$GITHUB_USERNAME" ]; then
+                        store_credential "GITHUB_USERNAME" "$GITHUB_USERNAME"
+                    fi
                     break
                 else
                     echo -e "${RED}✗ GitHub token is invalid${NC}"
@@ -245,34 +833,20 @@ prompt_api_credentials() {
             done
         else
             # Validate existing token
-            echo -e "${BLUE}Validating existing GitHub token...${NC}"
-            if [ -n "$GITHUB_USERNAME" ]; then
-                github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
+            if [ -z "$GITHUB_USERNAME" ]; then
+                echo -e "${RED}Error: GitHub username is required but not set${NC}"
+                echo -e "${YELLOW}Please set GITHUB_USERNAME or GITHUB_USER environment variable${NC}"
             else
-                github_init "$GITHUB_TOKEN" "placeholder"
+                echo -e "${BLUE}Validating existing GitHub token...${NC}"
+                github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
+                if ! github_validate_token; then
+                    echo -e "${RED}✗ Existing GitHub token is invalid${NC}"
+                    GITHUB_TOKEN=""
+                    export GITHUB_TOKEN
+                    prompt_api_credentials
+                    return
+                fi
             fi
-            if ! github_validate_token; then
-                echo -e "${RED}✗ Existing GitHub token is invalid${NC}"
-                GITHUB_TOKEN=""
-                export GITHUB_TOKEN
-                prompt_api_credentials
-                return
-            fi
-        fi
-        
-        # GitHub Username
-        if [ -z "$GITHUB_USERNAME" ] && [ -z "$GITHUB_USER" ]; then
-            echo ""
-            echo -e "${BLUE}Enter your GitHub username:${NC}"
-            read -p "GitHub Username: " GITHUB_USERNAME
-            export GITHUB_USERNAME
-        elif [ -n "$GITHUB_USER" ] && [ -z "$GITHUB_USERNAME" ]; then
-            export GITHUB_USERNAME="$GITHUB_USER"
-        fi
-        
-        # Initialize GitHub API if we have both token and username
-        if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_USERNAME" ]; then
-            github_init "$GITHUB_TOKEN" "$GITHUB_USERNAME"
         fi
         
         # Komodo credentials (optional)
@@ -316,6 +890,10 @@ prompt_api_credentials() {
                         komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"
                         if komodo_validate_credentials; then
                             echo -e "${GREEN}✓ Komodo credentials are valid${NC}"
+                            # Store the validated credentials
+                            store_credential "KOMODO_BASE_URL" "$KOMODO_BASE_URL"
+                            store_credential "KOMODO_API_KEY" "$KOMODO_API_KEY"
+                            store_credential "KOMODO_API_SECRET" "$KOMODO_API_SECRET"
                             break
                         else
                             echo -e "${RED}✗ Komodo credentials are invalid${NC}"
@@ -353,6 +931,10 @@ prompt_api_credentials() {
                         komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"
                         if komodo_validate_credentials; then
                             echo -e "${GREEN}✓ Komodo credentials are valid${NC}"
+                            # Store the validated credentials
+                            store_credential "KOMODO_BASE_URL" "$KOMODO_BASE_URL"
+                            store_credential "KOMODO_API_KEY" "$KOMODO_API_KEY"
+                            store_credential "KOMODO_API_SECRET" "$KOMODO_API_SECRET"
                             break
                         else
                             echo -e "${RED}✗ Komodo credentials are invalid${NC}"
@@ -386,7 +968,188 @@ prompt_api_credentials() {
                 fi
             fi
         fi
+        
+        # Show final summary and cleanup
+        echo ""
+        echo -e "${GREEN}=== Credentials Configuration Complete ===${NC}"
+        check_saved_credentials_status
+        cleanup_temp_files
+        echo ""
     fi
+}
+
+# Get tunnel token from user
+# Usage: get_tunnel_token <tunnel_id> <account_id>
+# Returns: Sets TUNNEL_TOKEN variable, returns 0 on success, 1 on failure
+get_tunnel_token() {
+    local tunnel_id="$1"
+    local account_id="$2"
+    
+    echo "" >&2
+    echo -e "${BLUE}=== Cloudflare Tunnel Token Required ===${NC}" >&2
+    echo "" >&2
+    echo -e "${YELLOW}Cloudflare now uses tokens instead of JSON credential files.${NC}" >&2
+    echo "" >&2
+    echo -e "${BLUE}Please get your tunnel token:${NC}" >&2
+    echo "" >&2
+    echo "1. Open your browser and go to: https://dash.cloudflare.com/" >&2
+    echo "2. Navigate to: Zero Trust → Networks → Tunnels" >&2
+    echo "3. Find your tunnel and click on it" >&2
+    echo "4. Look for the Docker command that starts with:" >&2
+    echo -e "   ${GREEN}docker run cloudflare/cloudflared:latest tunnel...${NC}" >&2
+    echo "5. Copy ONLY the token (the long string after '--token ')" >&2
+    echo "" >&2
+    echo -e "${YELLOW}Example token format:${NC}" >&2
+    echo "   eyJhIjoiYWJjZGVmIiwidCI6IjEyMzQ1Njc4IiwicyI6Inh5ejEyMyJ9" >&2
+    echo "" >&2
+    
+    # Try to get token from API first
+    echo -e "${BLUE}Attempting to retrieve token via API...${NC}" >&2
+    set +e
+    local api_token=$(cloudflare_get_tunnel_token "$tunnel_id" "$account_id" 2>/dev/null)
+    set -e
+    
+    if [ -n "$api_token" ]; then
+        echo -e "${GREEN}✓ Token retrieved via API${NC}" >&2
+        TUNNEL_TOKEN="$api_token"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}Could not retrieve token via API. Please paste it manually.${NC}" >&2
+    echo "" >&2
+    read -p "Paste your tunnel token here: " TUNNEL_TOKEN </dev/tty >&2
+    
+    if [ -z "$TUNNEL_TOKEN" ]; then
+        echo -e "${RED}No token provided${NC}" >&2
+        return 1
+    fi
+    
+    # Basic validation - tokens are base64 encoded and may contain = padding
+    if [[ ! "$TUNNEL_TOKEN" =~ ^[A-Za-z0-9_=-]+$ ]]; then
+        echo -e "${RED}Invalid token format${NC}" >&2
+        return 1
+    fi
+    
+    echo -e "${GREEN}✓ Token received${NC}" >&2
+    return 0
+}
+
+# Handle tunnel name conflict
+# Usage: handle_tunnel_conflict <tunnel_name> <account_id>
+# Returns: tunnel_id on success, empty string on failure/cancellation
+handle_tunnel_conflict() {
+    local tunnel_name="$1"
+    local account_id="$2"
+    
+    # Output to stderr so it's not captured by command substitution
+    echo "" >&2
+    echo -e "${YELLOW}⚠ A tunnel with the name '${tunnel_name}' already exists.${NC}" >&2
+    echo "" >&2
+    echo "What would you like to do?" >&2
+    echo "1) Use the existing tunnel" >&2
+    echo "2) Delete existing tunnel and create a new one" >&2
+    echo "3) Choose a different name" >&2
+    echo "4) Cancel and set up manually" >&2
+    echo "" >&2
+    
+    while true; do
+        read -p "Select option (1-4): " choice </dev/tty >&2
+        
+        case "$choice" in
+            1)
+                # Use existing tunnel
+                echo "" >&2
+                echo -e "${BLUE}Retrieving existing tunnel...${NC}" >&2
+                local existing_id=$(cloudflare_get_tunnel_by_name "$tunnel_name" "$account_id")
+                if [ -n "$existing_id" ]; then
+                    echo -e "${GREEN}✓ Using existing tunnel: ${existing_id}${NC}" >&2
+                    echo "$existing_id"
+                    return 0
+                else
+                    echo -e "${RED}Error: Could not retrieve existing tunnel${NC}" >&2
+                    return 1
+                fi
+                ;;
+            2)
+                # Delete and recreate
+                echo "" >&2
+                echo -e "${YELLOW}Attempting to delete existing tunnel...${NC}" >&2
+                local existing_id=$(cloudflare_get_tunnel_by_name "$tunnel_name" "$account_id")
+                if [ -z "$existing_id" ]; then
+                    echo -e "${RED}Error: Could not find existing tunnel to delete${NC}" >&2
+                    return 1
+                fi
+                
+                echo -e "${BLUE}Found tunnel: ${existing_id}${NC}" >&2
+                read -p "Are you sure you want to delete this tunnel? (y/N): " confirm </dev/tty >&2
+                if [[ ! $confirm =~ ^[Yy]$ ]]; then
+                    echo -e "${YELLOW}Delete cancelled${NC}" >&2
+                    return 1
+                fi
+                
+                if cloudflare_delete_tunnel "$existing_id" "$account_id"; then
+                    echo -e "${GREEN}✓ Tunnel deleted${NC}" >&2
+                    echo "" >&2
+                    echo -e "${BLUE}Creating new tunnel...${NC}" >&2
+                    local new_tunnel_id=$(cloudflare_create_tunnel "$tunnel_name" "$account_id")
+                    local create_status=$?
+                    if [ -n "$new_tunnel_id" ] && [ $create_status -eq 0 ]; then
+                        echo -e "${GREEN}✓ New tunnel created: ${new_tunnel_id}${NC}" >&2
+                        echo "$new_tunnel_id"
+                        return 0
+                    else
+                        echo -e "${RED}Error: Could not create new tunnel${NC}" >&2
+                        return 1
+                    fi
+                else
+                    echo -e "${RED}Error: Could not delete existing tunnel${NC}" >&2
+                    echo -e "${YELLOW}The tunnel may be in use or require manual deletion from the dashboard${NC}" >&2
+                    return 1
+                fi
+                ;;
+            3)
+                # Choose different name
+                echo "" >&2
+                while true; do
+                    read -p "Enter a new tunnel name: " new_name </dev/tty >&2
+                    if [ -z "$new_name" ]; then
+                        echo -e "${RED}Error: Name cannot be empty${NC}" >&2
+                        continue
+                    fi
+                    
+                    echo -e "${BLUE}Creating tunnel: ${new_name}...${NC}" >&2
+                    local new_tunnel_id=$(cloudflare_create_tunnel "$new_name" "$account_id" 2>&1)
+                    local create_status=$?
+                    
+                    # Check if this name also exists
+                    if echo "$new_tunnel_id" | grep -q "TUNNEL_EXISTS"; then
+                        echo -e "${RED}That name is also taken. Please try another name.${NC}" >&2
+                        continue
+                    fi
+                    
+                    if [ -n "$new_tunnel_id" ] && [ $create_status -eq 0 -o $create_status -eq 2 ]; then
+                        echo -e "${GREEN}✓ Tunnel created: ${new_tunnel_id}${NC}" >&2
+                        echo "$new_tunnel_id"
+                        return 0
+                    else
+                        echo -e "${RED}Error: Could not create tunnel${NC}" >&2
+                        read -p "Try another name? (Y/n): " retry </dev/tty >&2
+                        if [[ $retry =~ ^[Nn]$ ]]; then
+                            return 1
+                        fi
+                    fi
+                done
+                ;;
+            4)
+                # Cancel
+                echo -e "${YELLOW}Cancelled. Will fall back to manual setup.${NC}" >&2
+                return 1
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please select 1-4.${NC}" >&2
+                ;;
+        esac
+    done
 }
 
 # Validate API credentials
@@ -567,6 +1330,7 @@ cmd_init() {
     
     # Set Docker image based on GitHub username
     docker_image="ghcr.io/${github_user}/wordpress-frankenphp:latest"
+    BUILD_IMAGE=false
     
     # In automated mode, check if image exists or offer to build
     if [ "$AUTOMATED_MODE" = true ] && [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_USERNAME" ]; then
@@ -575,8 +1339,8 @@ cmd_init() {
         echo -e "${BLUE}Checking if Docker image exists in registry...${NC}"
         if github_check_image_exists "wordpress-frankenphp" "latest"; then
             echo -e "${GREEN}✓ Docker image already exists in registry${NC}"
-            read -p "Do you want to rebuild and push the image? (y/N): " rebuild_image
-            if [[ $rebuild_image =~ ^[Yy]$ ]]; then
+            read -p "Do you want to rebuild and push the image now? (Y/n): " rebuild_image
+            if [[ ! $rebuild_image =~ ^[Nn]$ ]]; then
                 BUILD_IMAGE=true
             else
                 BUILD_IMAGE=false
@@ -634,6 +1398,7 @@ WP_NONCE_SALT=${wp_nonce_salt}
 
 # Cloudflare Tunnel (will be set after tunnel creation)
 TUNNEL_ID=
+TUNNEL_TOKEN=
 EOF
     
     echo -e "${GREEN}✓ Created .env file${NC}"
@@ -717,6 +1482,11 @@ EOF
     
     # Create cloudflared directory
     mkdir -p cloudflared
+
+    # Prepare persistent WordPress paths for bind mounts
+    mkdir -p wordpress/wp-content/uploads
+    mkdir -p wordpress/wp-content/plugins
+    mkdir -p wordpress/wp-content/themes
     
     print_section "Configuration Summary"
     
@@ -757,22 +1527,68 @@ EOF
                 # Create tunnel
                 tunnel_name="${site_name}-tunnel"
                 echo "Creating tunnel: ${tunnel_name}..."
-                tunnel_id=$(cloudflare_create_tunnel "$tunnel_name" "$account_id")
                 
-                if [ -z "$tunnel_id" ]; then
+                # Capture both stdout and stderr, and the return code
+                set +e  # Temporarily disable exit on error
+                tunnel_create_output=$(cloudflare_create_tunnel "$tunnel_name" "$account_id" 2>&1)
+                tunnel_create_status=$?
+                set -e  # Re-enable exit on error
+                
+                # Check result
+                if [ $tunnel_create_status -eq 3 ] || echo "$tunnel_create_output" | grep -q "TUNNEL_EXISTS"; then
+                    # Tunnel exists - show interactive menu
+                    set +e  # Disable exit on error for interactive function
+                    tunnel_id=$(handle_tunnel_conflict "$tunnel_name" "$account_id")
+                    conflict_status=$?
+                    set -e  # Re-enable exit on error
+                    
+                    if [ -z "$tunnel_id" ] || [ $conflict_status -ne 0 ]; then
+                        echo -e "${YELLOW}Falling back to manual setup...${NC}"
+                        AUTOMATED_MODE=false
+                        tunnel_id=""
+                    fi
+                elif [ $tunnel_create_status -eq 0 ] && [ -n "$tunnel_create_output" ]; then
+                    # Successfully created new tunnel
+                    tunnel_id="$tunnel_create_output"
+                    echo -e "${GREEN}✓ Tunnel created: ${tunnel_id}${NC}"
+                else
+                    # Error
                     echo -e "${RED}Error: Could not create Cloudflare tunnel${NC}"
+                    if [ -n "$tunnel_create_output" ]; then
+                        echo "$tunnel_create_output" >&2
+                    fi
                     echo -e "${YELLOW}Falling back to manual setup...${NC}"
                     AUTOMATED_MODE=false
-                else
-                    echo -e "${GREEN}✓ Tunnel created: ${tunnel_id}${NC}"
+                    tunnel_id=""
+                fi
+                
+                if [ -n "$tunnel_id" ]; then
+                    # Get tunnel token
+                    set +e  # Disable exit on error for token retrieval
+                    get_tunnel_token "$tunnel_id" "$account_id"
+                    token_status=$?
+                    set -e  # Re-enable exit on error
                     
-                    # Get tunnel credentials
-                    echo "Downloading tunnel credentials..."
-                    mkdir -p cloudflared
-                    if cloudflare_get_tunnel_credentials "$tunnel_id" "$account_id" "cloudflared/${tunnel_id}.json"; then
-                        echo -e "${GREEN}✓ Tunnel credentials downloaded${NC}"
+                    if [ $token_status -eq 0 ] && [ -n "$TUNNEL_TOKEN" ]; then
+                        echo -e "${GREEN}✓ Tunnel token configured${NC}"
+                        
+                        # Store token securely in encrypted credentials if PIN is available
+                        if [ -n "$PIN" ]; then
+                            store_credential "TUNNEL_TOKEN" "$TUNNEL_TOKEN"
+                        fi
+                        
+                        # Also store in .env file (safer method without sed)
+                        if [ -f .env ]; then
+                            # Remove old TUNNEL_TOKEN line if exists
+                            grep -v "^TUNNEL_TOKEN=" .env > .env.tmp 2>/dev/null || true
+                            mv .env.tmp .env
+                        fi
+                        # Append new token
+                        echo "TUNNEL_TOKEN=${TUNNEL_TOKEN}" >> .env
                     else
-                        echo -e "${YELLOW}Warning: Could not download tunnel credentials automatically${NC}"
+                        echo -e "${YELLOW}Token setup cancelled. Falling back to manual setup...${NC}"
+                        AUTOMATED_MODE=false
+                        tunnel_id=""
                     fi
                 fi
             fi
@@ -796,22 +1612,30 @@ EOF
         
         if [ -z "$tunnel_id" ]; then
             echo -e "${YELLOW}No tunnel ID provided. You can add it later to .env file.${NC}"
-            mkdir -p cloudflared
         else
-            # Download tunnel credentials manually
-            echo ""
-            echo -e "${BLUE}You need to download your tunnel credentials file.${NC}"
-            echo "1. In the Cloudflare dashboard, click on your tunnel"
-            echo "2. Go to the 'Configure' tab"
-            echo "3. Download the credentials file (JSON format)"
-            echo ""
-            read -p "Enter the path to your tunnel credentials JSON file (or press Enter to skip): " creds_file
+            # Get tunnel token
+            set +e  # Disable exit on error for token retrieval
+            get_tunnel_token "$tunnel_id" "unknown"
+            token_status=$?
+            set -e  # Re-enable exit on error
             
-            if [ -n "$creds_file" ] && [ -f "$creds_file" ]; then
-                cp "$creds_file" "cloudflared/${tunnel_id}.json"
-                echo -e "${GREEN}✓ Copied tunnel credentials${NC}"
+            if [ $token_status -eq 0 ] && [ -n "$TUNNEL_TOKEN" ]; then
+                # Store token securely in encrypted credentials if PIN is available
+                if [ -n "$PIN" ]; then
+                    store_credential "TUNNEL_TOKEN" "$TUNNEL_TOKEN"
+                fi
+                
+                # Also store in .env file (safer method without sed)
+                if [ -f .env ]; then
+                    # Remove old TUNNEL_TOKEN line if exists
+                    grep -v "^TUNNEL_TOKEN=" .env > .env.tmp 2>/dev/null || true
+                    mv .env.tmp .env
+                fi
+                # Append new token
+                echo "TUNNEL_TOKEN=${TUNNEL_TOKEN}" >> .env
             else
-                echo -e "${YELLOW}Credentials file not provided. You'll need to manually place it at: cloudflared/${tunnel_id}.json${NC}"
+                echo -e "${YELLOW}You'll need to add the tunnel token manually to the .env file later${NC}"
+                echo -e "${YELLOW}Add this line: TUNNEL_TOKEN=your_token_here${NC}"
             fi
         fi
     fi
@@ -819,16 +1643,7 @@ EOF
     # Update .env with tunnel ID if we have it
     if [ -n "$tunnel_id" ]; then
         sed -i "s/TUNNEL_ID=$/TUNNEL_ID=${tunnel_id}/" .env
-        
-        # Generate cloudflared config
-        export TUNNEL_ID=$tunnel_id
-        export DOMAIN=$domain
-        if [ -f "cloudflared-config.yml.template" ]; then
-            envsubst < cloudflared-config.yml.template > cloudflared/config.yml
-        else
-            envsubst < "$SCRIPT_DIR/cloudflared-config.yml.template" > cloudflared/config.yml
-        fi
-        echo -e "${GREEN}✓ Created cloudflared/config.yml${NC}"
+        echo -e "${GREEN}✓ Tunnel ID saved to .env${NC}"
     fi
     
     print_section "Cloudflare DNS Configuration"
@@ -851,17 +1666,44 @@ EOF
                 echo -e "${GREEN}✓ Zone ID: ${zone_id}${NC}"
                 
                 # Create DNS record
-                dns_name="@"
+                dns_name="${domain}"
                 dns_target="${tunnel_id}.cfargotunnel.com"
                 echo "Creating CNAME record: ${dns_name} -> ${dns_target}..."
                 
-                record_id=$(cloudflare_create_dns_record "$zone_id" "$dns_name" "$dns_target" "true")
+                # Capture both output and errors without exiting on non-zero
+                set +e
+                dns_output=$(cloudflare_create_dns_record "$zone_id" "$dns_name" "$dns_target" "true" 2>&1)
+                dns_status=$?
+                set -e
                 
-                if [ -n "$record_id" ]; then
-                    echo -e "${GREEN}✓ DNS record created successfully${NC}"
+                if [ $dns_status -eq 0 ]; then
+                    if echo "$dns_output" | grep -q "already exists"; then
+                        echo -e "${GREEN}✓ DNS record already exists${NC}"
+                    else
+                        echo -e "${GREEN}✓ DNS record created successfully${NC}"
+                    fi
                 else
                     echo -e "${YELLOW}Warning: Could not create DNS record automatically${NC}"
-                    echo -e "${YELLOW}Please create it manually in Cloudflare dashboard${NC}"
+                    
+                    # Show specific error if available
+                    if echo "$dns_output" | grep -qi "authentication\|auth"; then
+                        echo -e "${RED}Authentication Error: Your API token may not have DNS edit permissions${NC}"
+                        echo -e "${YELLOW}Required permission: Zone → DNS → Edit${NC}"
+                    elif echo "$dns_output" | grep -qi "not found"; then
+                        echo -e "${RED}Zone not found: Please verify the domain is in your Cloudflare account${NC}"
+                    elif [ -n "$dns_output" ]; then
+                        echo -e "${RED}Error: ${dns_output}${NC}"
+                    fi
+                    
+                    echo ""
+                    echo -e "${BLUE}Please create the DNS record manually:${NC}"
+                    echo "1. Go to https://dash.cloudflare.com/"
+                    echo "2. Select your domain: ${domain}"
+                    echo "3. Go to DNS → Records"
+                    echo "4. Add a CNAME record:"
+                    echo "   Name: @ (or root)"
+                    echo "   Target: ${dns_target}"
+                    echo "   Proxy status: Proxied (orange cloud)"
                 fi
             fi
         fi
@@ -904,26 +1746,61 @@ EOF
                 echo -e "${YELLOW}You can build it manually later using:${NC}"
                 echo "  ./build.sh --user ${github_user}"
                 echo "  ./push.sh --user ${github_user}"
+                if [ "$AUTOMATED_MODE" = true ]; then
+                    echo -e "${RED}Aborting automated deployment due to image build failure.${NC}"
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+
+    # Deploy to Komodo automatically (if configured)
+    if [ "$AUTOMATED_MODE" = true ] && [ -n "$KOMODO_BASE_URL" ] && [ -n "$KOMODO_API_KEY" ] && [ -n "$KOMODO_API_SECRET" ]; then
+        print_section "Komodo Deployment"
+        
+        read -p "Komodo server name (leave blank for default): " komodo_server
+        
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}[DRY RUN] Would create/update and deploy stack in Komodo${NC}"
+        else
+            if perform_komodo_deploy "${site_name}" "$komodo_server"; then
+                echo -e "${GREEN}✓ Komodo stack deployed successfully${NC}"
+            else
+                echo -e "${RED}Error: Failed to deploy stack to Komodo${NC}"
+                exit 1
             fi
         fi
     fi
     
-    # Save API credentials to config file if in automated mode
-    if [ "$AUTOMATED_MODE" = true ]; then
-        mkdir -p config
-        cat > config/api-credentials <<EOF
-# API Credentials (auto-generated)
-# Keep this file secure and do not commit it to version control
-
-CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
-GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-GITHUB_USERNAME="${GITHUB_USERNAME:-}"
-KOMODO_BASE_URL="${KOMODO_BASE_URL:-}"
-KOMODO_API_KEY="${KOMODO_API_KEY:-}"
-KOMODO_API_SECRET="${KOMODO_API_SECRET:-}"
-EOF
-        chmod 600 config/api-credentials
-        echo -e "${GREEN}✓ API credentials saved to config/api-credentials${NC}"
+    # Clean up temp file if it exists (credentials should already be saved individually)
+    if [ -f "config/api-credentials.tmp" ]; then
+        # Check if there are any unsaved credentials in temp file
+        local temp_creds_file="config/api-credentials.tmp"
+        local encrypted_file="config/api-credentials.enc"
+        
+        if [ -f "$encrypted_file" ] && [ -n "$PIN" ]; then
+            # Merge any remaining credentials from temp file
+            local final_creds_file="config/api-credentials"
+            if decrypt_credentials "$encrypted_file" "$final_creds_file" "$PIN"; then
+                # Merge temp file into decrypted file
+                while IFS='=' read -r key value; do
+                    if [[ "$key" =~ ^[A-Z_]+$ ]] && [ -n "$value" ]; then
+                        # Remove quotes from value
+                        value=$(echo "$value" | sed 's/^"//;s/"$//')
+                        # Update or add this credential
+                        grep -v "^${key}=" "$final_creds_file" > "${final_creds_file}.new" 2>/dev/null || true
+                        echo "${key}=\"${value}\"" >> "${final_creds_file}.new"
+                        mv "${final_creds_file}.new" "$final_creds_file"
+                    fi
+                done < "$temp_creds_file"
+                
+                # Re-encrypt
+                encrypt_credentials "$final_creds_file" "$encrypted_file" "$PIN"
+            fi
+        fi
+        
+        # Clean up temp file
+        rm -f "$temp_creds_file"
     fi
     
     print_section "Deployment Commands"
@@ -999,6 +1876,14 @@ cmd_update() {
     fi
     
     print_section "Updating WordPress"
+
+    # Load API credentials (for optional Komodo deployment)
+    load_api_credentials
+    if [ -f ".env" ]; then
+        set -a
+        source .env 2>/dev/null || true
+        set +a
+    fi
     
     echo "Pulling latest images..."
     docker compose pull
@@ -1083,6 +1968,77 @@ cmd_show_config() {
     print_end_delimiter
 }
 
+# Perform Komodo deployment (shared by init and deploy)
+# Usage: perform_komodo_deploy <stack_name> [server_name]
+perform_komodo_deploy() {
+    local stack_name="$1"
+    local server_name="${2:-}"
+    local compose_path="docker-compose.yml"
+    local komodo_compose="config/komodo-compose.yml"
+    
+    if [ -z "$stack_name" ]; then
+        echo -e "${RED}Error: Stack name is required${NC}"
+        return 1
+    fi
+    
+    # Initialize Komodo API
+    if ! komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"; then
+        echo -e "${RED}Error: Failed to initialize Komodo API${NC}"
+        return 1
+    fi
+    
+    # Validate credentials
+    if ! komodo_validate_credentials; then
+        echo -e "${RED}Error: Invalid Komodo credentials${NC}"
+        return 1
+    fi
+
+    # Prefer a freshly rendered compose file for Komodo to avoid YAML parsing issues
+    if [ -f ".env" ]; then
+        set -a
+        source .env 2>/dev/null || true
+        set +a
+    fi
+
+    if [ -f "docker-compose.yml.template" ] && [ -f ".env" ]; then
+        if command -v envsubst &> /dev/null; then
+            mkdir -p config
+            envsubst < docker-compose.yml.template > "$komodo_compose"
+            compose_path="$komodo_compose"
+        else
+            echo -e "${RED}Error: envsubst not found. Cannot render a fully hardcoded compose file for Komodo.${NC}"
+            echo -e "${YELLOW}Install gettext (envsubst) and try again.${NC}"
+            return 1
+        fi
+    fi
+
+    if grep -q '\${' "$compose_path"; then
+        echo -e "${RED}Error: Compose file still contains unresolved variables. Komodo requires a fully hardcoded file.${NC}"
+        echo -e "${YELLOW}Ensure all variables are set in .env and try again.${NC}"
+        return 1
+    fi
+    
+    echo "Creating/updating stack: ${stack_name}"
+    
+    # Ensure stack exists (create or update)
+    if komodo_ensure_stack "$stack_name" "$compose_path" "$server_name"; then
+        echo -e "${GREEN}✓ Stack created/updated successfully${NC}"
+        
+        # Deploy the stack
+        echo "Deploying stack..."
+        if komodo_deploy_stack "$stack_name"; then
+            echo -e "${GREEN}✓ Stack deployed successfully${NC}"
+            return 0
+        else
+            echo -e "${RED}Error: Failed to deploy stack${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}Error: Failed to create/update stack${NC}"
+        return 1
+    fi
+}
+
 # Deploy to Komodo
 cmd_deploy() {
     if [ ! -f "docker-compose.yml" ]; then
@@ -1112,36 +2068,14 @@ cmd_deploy() {
     
     print_section "Deploying to Komodo"
     
-    # Initialize Komodo API
-    komodo_init "$KOMODO_BASE_URL" "$KOMODO_API_KEY" "$KOMODO_API_SECRET"
-    
-    # Validate credentials
-    if ! komodo_validate_credentials; then
-        echo -e "${RED}Error: Invalid Komodo credentials${NC}"
-        exit 1
-    fi
-    
-    echo "Creating/updating stack: ${stack_name}"
-    
     if [ "$DRY_RUN" = true ]; then
-        echo -e "${YELLOW}[DRY RUN] Would create/update stack in Komodo${NC}"
-    else
-        # Ensure stack exists (create or update)
-        if komodo_ensure_stack "$stack_name" "docker-compose.yml" "$server_name"; then
-            echo -e "${GREEN}✓ Stack created/updated successfully${NC}"
-            
-            # Deploy the stack
-            echo "Deploying stack..."
-            if komodo_deploy_stack "$stack_name"; then
-                echo -e "${GREEN}✓ Stack deployed successfully${NC}"
-            else
-                echo -e "${RED}Error: Failed to deploy stack${NC}"
-                exit 1
-            fi
-        else
-            echo -e "${RED}Error: Failed to create/update stack${NC}"
-            exit 1
-        fi
+        echo -e "${YELLOW}[DRY RUN] Would create/update and deploy stack in Komodo${NC}"
+        return 0
+    fi
+
+    if ! perform_komodo_deploy "$stack_name" "$server_name"; then
+        echo -e "${RED}Error: Failed to deploy stack${NC}"
+        exit 1
     fi
 }
 
