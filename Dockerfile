@@ -18,6 +18,7 @@ RUN apt-get update && \
     libonig-dev \
     libexif-dev \
     libcurl4-openssl-dev \
+    libmagickwand-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install \
         pdo_mysql \
@@ -27,6 +28,8 @@ RUN apt-get update && \
         intl \
         exif \
         bcmath \
+    && pecl install imagick \
+    && docker-php-ext-enable imagick \
     && rm -rf /var/lib/apt/lists/*
 
 # Download latest WordPress
@@ -46,6 +49,5 @@ EXPOSE 80
 
 # Use entrypoint script
 COPY Caddyfile /etc/frankenphp/Caddyfile
-
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["frankenphp", "run", "--config", "/etc/frankenphp/Caddyfile"]

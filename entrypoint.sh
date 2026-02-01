@@ -121,6 +121,38 @@ if [ -f /var/www/html/wp-config.php ]; then
     fi
 fi
 
+# Set WordPress filesystem method and temp directory
+if [ -f /var/www/html/wp-config.php ]; then
+    if ! grep -q "FS_METHOD" /var/www/html/wp-config.php; then
+        echo "Injecting filesystem configuration into wp-config.php..."
+        tmpfile="$(mktemp)"
+        awk '
+            BEGIN { inserted=0 }
+            # Insert before the canonical "stop editing" marker if present
+            /\/\* That\x27s all, stop editing! Happy publishing\. \*\// && inserted==0 {
+                print ""
+                print "// Filesystem method and temp directory configuration"
+                print "if (!defined(\"FS_METHOD\")) define(\"FS_METHOD\", \"direct\");"
+                print "if (!defined(\"WP_TEMP_DIR\")) define(\"WP_TEMP_DIR\", \"/tmp\");"
+                print ""
+                inserted=1
+            }
+            { print }
+            END {
+                if (inserted==0) {
+                    print ""
+                    print "// Filesystem method and temp directory configuration"
+                    print "if (!defined(\"FS_METHOD\")) define(\"FS_METHOD\", \"direct\");"
+                    print "if (!defined(\"WP_TEMP_DIR\")) define(\"WP_TEMP_DIR\", \"/tmp\");"
+                    print ""
+                }
+            }
+        ' /var/www/html/wp-config.php > "$tmpfile"
+        cat "$tmpfile" > /var/www/html/wp-config.php
+        rm -f "$tmpfile"
+    fi
+fi
+
 # Set proper permissions
 chown -R www-data:www-data /var/www/html
 find /var/www/html -type d -exec chmod 755 {} \;

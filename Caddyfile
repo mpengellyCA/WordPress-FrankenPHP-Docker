@@ -5,6 +5,52 @@
 
 :80 {
     root * /var/www/html
+    
+    # Add cache headers for static assets
+    @static {
+        path *.jpg *.jpeg *.png *.gif *.ico *.svg *.webp *.avif
+        path *.css *.js *.woff *.woff2 *.ttf *.eot
+        path *.pdf *.zip *.tar *.gz
+    }
+    header @static {
+        Cache-Control "public, max-age=31536000, immutable"
+        X-Cache-Enabled "true"
+    }
+    
+    # Add cache headers for HTML pages (shorter cache time)
+    # Note: WordPress caching plugins will override these for cached pages
+    @html {
+        path *.html
+        path /
+    }
+    header @html {
+        Cache-Control "public, max-age=3600"
+        X-Cache-Enabled "true"
+    }
+    
+    # Security headers
+    header {
+        # Remove server header for security
+        -Server
+        
+        # X-Content-Type-Options: Prevent MIME type sniffing
+        X-Content-Type-Options "nosniff"
+        
+        # X-Frame-Options: Prevent clickjacking
+        X-Frame-Options "SAMEORIGIN"
+        
+        # Referrer Policy: Control referrer information
+        Referrer-Policy "strict-origin-when-cross-origin"
+        
+        # Strict Transport Security (HSTS)
+        # Note: Since behind Cloudflare Tunnel (HTTPS), this will be effective
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        
+        # Content Security Policy
+        # Basic CSP for WordPress - may need adjustment based on plugins/themes
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://ajax.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://use.fontawesome.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://use.fontawesome.com data:; img-src 'self' data: https:; media-src 'self' https:; connect-src 'self' https:; frame-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self';"
+    }
+    
     php_server
     file_server
 }
